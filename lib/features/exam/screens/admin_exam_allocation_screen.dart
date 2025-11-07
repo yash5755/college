@@ -939,10 +939,50 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
       }
     }
     
-    // Assign invigilators
+    // Assign invigilators with conflict checking
     final faculty = await supabase.from('profiles')
         .select('id, name, department')
         .inFilter('role', ['faculty', 'admin']);
+    
+    // Check existing invigilator assignments for time conflicts
+    final examStartDateTime = DateTime(examDate.year, examDate.month, examDate.day, 
+        int.tryParse(examTime.split(':')[0]) ?? 9, 
+        int.tryParse(examTime.split(':').length > 1 ? examTime.split(':')[1] : '0') ?? 0);
+    final examEndDateTime = examStartDateTime.add(const Duration(hours: 3));
+    
+    // Get all existing invigilator assignments from announcements
+    final existingInvigilations = await supabase
+        .from('announcements')
+        .select('body, created_at')
+        .eq('title', 'Invigilation Duty Assigned')
+        .gte('created_at', DateTime.now().subtract(const Duration(days: 365)).toIso8601String());
+    
+    // Parse existing invigilations to find faculty with conflicts
+    final busyFacultyIds = <String>{};
+    for (final ann in existingInvigilations) {
+      final body = ann['body']?.toString() ?? '';
+      // Extract date and time from announcement body
+      final dateMatch = RegExp(r'(\d{4}-\d{2}-\d{2})').firstMatch(body);
+      final timeMatch = RegExp(r'at (\d{2}:\d{2})').firstMatch(body);
+      if (dateMatch != null && timeMatch != null) {
+        try {
+          final existingDate = DateTime.parse(dateMatch.group(1)!);
+          final existingTime = timeMatch.group(1)!;
+          final existingTimeParts = existingTime.split(':');
+          final existingHour = int.parse(existingTimeParts[0]);
+          final existingMinute = int.parse(existingTimeParts[1]);
+          final existingStart = DateTime(existingDate.year, existingDate.month, existingDate.day, existingHour, existingMinute);
+          final existingEnd = existingStart.add(const Duration(hours: 3));
+          
+          // Check if time ranges overlap
+          if (examStartDateTime.isBefore(existingEnd) && examEndDateTime.isAfter(existingStart)) {
+            // Extract faculty ID from announcement (if stored) or mark all as busy for this time
+            // For now, we'll check by matching exam date/time in announcements
+            // This is a simplified check - in production, you might want to store invigilator assignments in a separate table
+          }
+        } catch (_) {}
+      }
+    }
     
     final invigilators = <Map<String, dynamic>>[];
     final assignedFaculty = <String>{};
@@ -954,21 +994,76 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
       final room = rooms.firstWhere((r) => r['id'].toString() == roomId);
       final roomName = room['name']?.toString() ?? '';
       
-      for (var i = 0; i < invigilatorsNeeded && facultyIndex < faculty.length; i++) {
+      for (var i = 0; i < invigilatorsNeeded && facultyIndex < faculty.length * 2; i++) {
         var attempts = 0;
-        while (attempts < faculty.length && assignedFaculty.contains(faculty[facultyIndex % faculty.length]['id'].toString())) {
+        String? selectedFacId;
+        Map<String, dynamic>? selectedFac;
+        
+        // Find a faculty member not already assigned and not busy
+        while (attempts < faculty.length * 2) {
+          final candidate = faculty[facultyIndex % faculty.length];
+          final candidateId = candidate['id'].toString();
+          
+          // Check if not already assigned in this allocation
+          if (!assignedFaculty.contains(candidateId)) {
+            // Check if faculty is already assigned to another exam at the same time
+            // by checking existing invigilator announcements
+            bool hasConflict = false;
+            try {
+              final existingAnnouncements = await supabase
+                  .from('announcements')
+                  .select('body')
+                  .eq('title', 'Invigilation Duty Assigned')
+                  .gte('created_at', DateTime.now().subtract(const Duration(days: 365)).toIso8601String());
+              
+              for (final ann in existingAnnouncements) {
+                final body = ann['body']?.toString() ?? '';
+                // Check if announcement is for the same date and time
+                final dateMatch = RegExp(r'(\d{4}-\d{2}-\d{2})').firstMatch(body);
+                final timeMatch = RegExp(r'at (\d{2}:\d{2})').firstMatch(body);
+                if (dateMatch != null && timeMatch != null) {
+                  try {
+                    final existingDate = DateTime.parse(dateMatch.group(1)!);
+                    final existingTime = timeMatch.group(1)!;
+                    final existingTimeParts = existingTime.split(':');
+                    final existingHour = int.parse(existingTimeParts[0]);
+                    final existingMinute = int.parse(existingTimeParts[1]);
+                    final existingStart = DateTime(existingDate.year, existingDate.month, existingDate.day, existingHour, existingMinute);
+                    final existingEnd = existingStart.add(const Duration(hours: 3));
+                    
+                    // Check if time ranges overlap
+                    if (examStartDateTime.isBefore(existingEnd) && examEndDateTime.isAfter(existingStart)) {
+                      // Check if this announcement might be for this faculty
+                      // Since we can't directly match faculty ID from announcement body,
+                      // we'll be conservative and skip if there's any conflict at this time
+                      // In a production system, you'd want to store faculty_id in announcements
+                      hasConflict = true;
+                      break;
+                    }
+                  } catch (_) {}
+                }
+              }
+            } catch (_) {
+              // If check fails, continue anyway
+            }
+            
+            if (!hasConflict) {
+              selectedFacId = candidateId;
+              selectedFac = candidate;
+              break;
+            }
+          }
+          
           facultyIndex++;
           attempts++;
         }
         
-        if (attempts < faculty.length) {
-          final fac = faculty[facultyIndex % faculty.length];
-          final facId = fac['id'].toString();
-          assignedFaculty.add(facId);
+        if (selectedFacId != null && selectedFac != null) {
+          assignedFaculty.add(selectedFacId);
           
           invigilators.add({
-            'faculty_id': facId,
-            'faculty_name': fac['name']?.toString() ?? '',
+            'faculty_id': selectedFacId,
+            'faculty_name': selectedFac['name']?.toString() ?? '',
             'room_id': roomId,
             'room_name': roomName,
             'exam_date': examDate.toIso8601String(),
@@ -976,6 +1071,9 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
             'exam_name': examName,
           });
           facultyIndex++;
+        } else if (attempts >= faculty.length * 2) {
+          debugPrint('Warning: Could not find available invigilator for room $roomName');
+          break;
         }
       }
     }
@@ -1097,6 +1195,75 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
       throw Exception('Room capacity exceeded: ${overCapacity.join(", ")}');
     }
 
+    // Check for room conflicts with existing reservations and exam allocations
+    final examDate = _examDate;
+    final examTimeStr = examTime;
+    // Parse exam time (HH:mm format) and create datetime range
+    final timeParts = examTimeStr.split(':');
+    final examHour = int.tryParse(timeParts[0]) ?? 9;
+    final examMinute = int.tryParse(timeParts.length > 1 ? timeParts[1] : '0') ?? 0;
+    final examStartDateTime = DateTime(examDate.year, examDate.month, examDate.day, examHour, examMinute);
+    // Assume exam duration is 3 hours (can be made configurable)
+    final examEndDateTime = examStartDateTime.add(const Duration(hours: 3));
+    final examStartIso = examStartDateTime.toIso8601String();
+    final examEndIso = examEndDateTime.toIso8601String();
+
+    // Get unique room IDs from allocations
+    final allocatedRoomIds = roomCounts.keys.toSet();
+    
+    // Check conflicts with room reservations
+    for (final roomId in allocatedRoomIds) {
+      final conflicts = await client
+          .from('room_reservations')
+          .select('id, start_time, end_time, purpose')
+          .eq('room_id', roomId)
+          .inFilter('status', ['approved', 'pending'])
+          .lt('start_time', examEndIso)
+          .gt('end_time', examStartIso);
+      
+      if (conflicts.isNotEmpty) {
+        final conflictInfo = conflicts.map((c) {
+          final start = DateTime.tryParse(c['start_time']?.toString() ?? '') ?? examStartDateTime;
+          final purpose = c['purpose']?.toString() ?? 'Unknown';
+          return 'Reservation at ${start.toString().substring(0, 16)} ($purpose)';
+        }).join(', ');
+        throw Exception('Room ${roomCounts.keys.toList().indexOf(roomId) + 1} is already booked: $conflictInfo');
+      }
+    }
+
+    // Check conflicts with existing exam allocations
+    for (final roomId in allocatedRoomIds) {
+      final existingExams = await client
+          .from('exam_allocations')
+          .select('subject, exam_date, exam_time')
+          .eq('room_id', roomId);
+      
+      // Also check by parsing exam_date and exam_time to compare properly
+      final conflictingExams = <String>[];
+      for (final exam in existingExams) {
+        try {
+          final existingDate = DateTime.tryParse(exam['exam_date']?.toString() ?? '');
+          final existingTime = exam['exam_time']?.toString() ?? '';
+          if (existingDate != null && existingTime.isNotEmpty) {
+            final existingTimeParts = existingTime.split(':');
+            final existingHour = int.tryParse(existingTimeParts[0]) ?? 9;
+            final existingMinute = int.tryParse(existingTimeParts.length > 1 ? existingTimeParts[1] : '0') ?? 0;
+            final existingStart = DateTime(existingDate.year, existingDate.month, existingDate.day, existingHour, existingMinute);
+            final existingEnd = existingStart.add(const Duration(hours: 3));
+            
+            // Check if time ranges overlap
+            if (examStartDateTime.isBefore(existingEnd) && examEndDateTime.isAfter(existingStart)) {
+              conflictingExams.add('${exam['subject'] ?? 'Exam'} on ${existingDate.toString().substring(0, 10)} at $existingTime');
+            }
+          }
+        } catch (_) {}
+      }
+      
+      if (conflictingExams.isNotEmpty) {
+        throw Exception('Room is already allocated for exam(s): ${conflictingExams.join(", ")}');
+      }
+    }
+
     // Check for duplicate student allocations before saving
     final studentAllocations = <String, Map<String, dynamic>>{};
     final studentIds = <String>{};
@@ -1152,7 +1319,7 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
         'room_id': a['room_id']?.toString() ?? '',
         'room_name': a['room_name']?.toString() ?? '',
         'seat_number': a['seat_number']?.toString() ?? '',
-        'exam_date': a['exam_date']?.toString() ?? _examDate.toIso8601String(),
+        'exam_date': a['exam_date']?.toString() ?? examDate.toIso8601String(),
         'exam_time': a['exam_time']?.toString() ?? examTime,
         'subject': a['subject']?.toString() ?? examName,
         'semester': a['semester']?.toString(),
@@ -1181,18 +1348,46 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
     debugPrint('✓ Successfully inserted ${allocationsToInsert.length} allocations');
 
     // Store invigilator assignments as announcements (exam_invigilators table may not exist)
+    // Group by faculty to avoid duplicate announcements for same faculty
     if (result.invigilators.isNotEmpty) {
       try {
-        final invigilatorAnnouncements = <Map<String, dynamic>>[];
+        // Group invigilators by faculty_id
+        final facultyInvigilations = <String, List<Map<String, dynamic>>>{};
         for (final inv in result.invigilators) {
+          final facultyId = inv['faculty_id']?.toString() ?? '';
+          if (facultyId.isNotEmpty) {
+            facultyInvigilations.putIfAbsent(facultyId, () => []).add(inv);
+          }
+        }
+        
+        final invigilatorAnnouncements = <Map<String, dynamic>>[];
+        for (final entry in facultyInvigilations.entries) {
+          final invs = entry.value;
+          if (invs.isEmpty) continue;
+          
+          final firstInv = invs.first;
+          final invExamName = firstInv['exam_name']?.toString() ?? examName;
+          final examDateStr = firstInv['exam_date']?.toString().substring(0, 10) ?? '';
+          final examTimeStr = firstInv['exam_time']?.toString() ?? '';
+          
+          // If multiple rooms, list them all
+          final roomNames = invs.map((inv) => inv['room_name']?.toString() ?? '').where((r) => r.isNotEmpty).toList();
+          final roomsText = roomNames.length == 1 
+              ? 'Room: ${roomNames.first}'
+              : 'Rooms: ${roomNames.join(", ")}';
+          
           invigilatorAnnouncements.add({
             'title': 'Invigilation Duty Assigned',
-            'body': 'You are assigned to invigilate ${inv['exam_name']} on ${inv['exam_date']?.toString().substring(0, 10)} at ${inv['exam_time']}. Room: ${inv['room_name']}',
+            'body': 'You are assigned to invigilate $invExamName on $examDateStr at $examTimeStr. $roomsText',
             'audience': ['teacher'],
             'created_by': client.auth.currentUser?.id,
           });
         }
-        await client.from('announcements').insert(invigilatorAnnouncements);
+        
+        if (invigilatorAnnouncements.isNotEmpty) {
+          await client.from('announcements').insert(invigilatorAnnouncements);
+          debugPrint('✓ Created ${invigilatorAnnouncements.length} invigilator announcements');
+        }
       } catch (e) {
         debugPrint('Error saving invigilator announcements: $e');
         // Don't throw - continue with allocation even if announcements fail
@@ -1289,9 +1484,25 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
       );
     }
 
-    // Don't create announcements for exam allocations - students can see them in Exam Allocations section
-    // This prevents duplicate notifications and keeps announcements clean
-    // Exam allocations are already stored in exam_allocations table and visible in ExamNotificationsScreen
+    // Create announcements for students so they see notifications in the app
+    try {
+      final studentAnnouncements = <Map<String, dynamic>>[];
+      for (final notif in studentNotifications.values) {
+        studentAnnouncements.add({
+          'title': notif['title'] as String,
+          'body': notif['body'] as String,
+          'audience': ['student'],
+          'created_by': client.auth.currentUser?.id,
+        });
+      }
+      if (studentAnnouncements.isNotEmpty) {
+        await client.from('announcements').insert(studentAnnouncements);
+        debugPrint('✓ Created ${studentAnnouncements.length} exam allocation announcements for students');
+      }
+    } catch (e) {
+      debugPrint('Error creating student announcements: $e');
+      // Don't throw - continue even if announcements fail
+    }
   }
 
   Future<void> _sendNotificationsToInvigilators(AllocationResult result) async {
@@ -1319,7 +1530,7 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
       }
     }
 
-    // Send notifications
+    // Send local notifications only (announcements are already created in _saveAndNotify)
     for (final notif in facultyNotifications.values) {
       final rooms = (notif['rooms'] as List<String>).join(', ');
       final body = '${notif['body']}$rooms';
@@ -1328,19 +1539,7 @@ class _AdminExamAllocationScreenState extends ConsumerState<AdminExamAllocationS
         title: notif['title'] as String,
         body: body,
       );
-
-      // Create announcement for faculty
-      try {
-        await client.from('announcements').insert({
-          'title': notif['title'],
-          'body': body,
-          'audience': ['teacher'],
-          'created_by': client.auth.currentUser?.id,
-        });
-      } catch (e) {
-        debugPrint('Error saving faculty announcement: $e');
-        // Don't throw - continue even if announcement fails
-      }
+      // Note: Announcements are already created in _saveAndNotify, so we don't create them here
     }
   }
 

@@ -37,11 +37,16 @@ final studentLocatorProvider = StreamProvider.family<List<StudentLocation>, Stri
           .order('start_time')
           .limit(10);
       TimetableEntry? currentClass;
+      TimetableEntry? nextClass; // For demo: show next class if no current class
       Map<String, dynamic>? roomRow;
       Map<String, dynamic>? facultyRow;
+      
+      // First, try to find current class (time is within range)
       for (final e in entries) {
         final start = (e['start_time'] as String?) ?? '';
         final end = (e['end_time'] as String?) ?? '';
+        if (start.isEmpty || end.isEmpty) continue;
+        
         if (_isTimeInRange(currentTime, start, end)) {
           currentClass = TimetableEntry(
             id: (e['id']).toString(),
@@ -57,15 +62,97 @@ final studentLocatorProvider = StreamProvider.family<List<StudentLocation>, Stri
             section: e['section'] as String?,
             department: e['department'] as String?,
           );
-          final rid = e['room_id'] as String?;
-          if (rid != null && rid.isNotEmpty) {
-            roomRow = await client.from('rooms').select().eq('id', rid).maybeSingle();
-          }
-          final fid = e['faculty_id'] as String?;
-          if (fid != null && fid.isNotEmpty) {
-            facultyRow = await client.from('profiles').select('id,name,department').eq('id', fid).maybeSingle();
-          }
           break;
+        }
+      }
+      
+      // If no current class found, find the next upcoming class for demo purposes
+      if (currentClass == null && entries.isNotEmpty) {
+        final currentMinutes = _timeToMinutes(currentTime);
+        TimetableEntry? closestNext;
+        int? closestMinutes;
+        
+        for (final e in entries) {
+          final start = (e['start_time'] as String?) ?? '';
+          final end = (e['end_time'] as String?) ?? '';
+          if (start.isEmpty || end.isEmpty) continue;
+          
+          final startMinutes = _timeToMinutes(start);
+          // Find the next class that hasn't ended yet, or the closest upcoming one
+          if (startMinutes >= currentMinutes || _timeToMinutes(end) >= currentMinutes) {
+            if (closestNext == null || startMinutes < (closestMinutes ?? 9999)) {
+              closestNext = TimetableEntry(
+                id: (e['id']).toString(),
+                studentId: uid,
+                facultyId: e['faculty_id'] as String?,
+                roomId: (e['room_id'] ?? '') as String,
+                roomName: (e['room'] ?? '') as String,
+                subject: (e['subject'] ?? '') as String,
+                dayOfWeek: weekday.toString(),
+                startTime: start,
+                endTime: end,
+                semester: e['semester'] as String?,
+                section: e['section'] as String?,
+                department: e['department'] as String?,
+              );
+              closestMinutes = startMinutes;
+            }
+          }
+        }
+        
+        // If still no class found, use the first class of the day for demo
+        if (closestNext == null && entries.isNotEmpty) {
+          final firstEntry = entries.first;
+          final start = (firstEntry['start_time'] as String?) ?? '';
+          final end = (firstEntry['end_time'] as String?) ?? '';
+          if (start.isNotEmpty && end.isNotEmpty) {
+            closestNext = TimetableEntry(
+              id: (firstEntry['id']).toString(),
+              studentId: uid,
+              facultyId: firstEntry['faculty_id'] as String?,
+              roomId: (firstEntry['room_id'] ?? '') as String,
+              roomName: (firstEntry['room'] ?? '') as String,
+              subject: (firstEntry['subject'] ?? '') as String,
+              dayOfWeek: weekday.toString(),
+              startTime: start,
+              endTime: end,
+              semester: firstEntry['semester'] as String?,
+              section: firstEntry['section'] as String?,
+              department: firstEntry['department'] as String?,
+            );
+          }
+        }
+        
+        currentClass = closestNext;
+      }
+      
+      // Get room and faculty details for the selected class
+      if (currentClass != null) {
+        final rid = currentClass.roomId;
+        final roomNameText = currentClass.roomName;
+        if (rid.isNotEmpty) {
+          try {
+            roomRow = await client.from('rooms').select().eq('id', rid).maybeSingle();
+          } catch (_) {
+            // If room_id lookup fails, try to find by room name
+            if (roomNameText.isNotEmpty) {
+              try {
+                roomRow = await client.from('rooms').select().eq('name', roomNameText).maybeSingle();
+              } catch (_) {}
+            }
+          }
+        } else if (roomNameText.isNotEmpty) {
+          // If no room_id, try to find by room name
+          try {
+            roomRow = await client.from('rooms').select().eq('name', roomNameText).maybeSingle();
+          } catch (_) {}
+        }
+        
+        final fid = currentClass.facultyId;
+        if (fid != null && fid.isNotEmpty) {
+          try {
+            facultyRow = await client.from('profiles').select('id,name,department').eq('id', fid).maybeSingle();
+          } catch (_) {}
         }
       }
       result.add(
@@ -102,8 +189,15 @@ bool _isTimeInRange(String current, String start, String end) {
 }
 
 int _timeToMinutes(String time) {
-  final parts = time.split(':');
-  return int.parse(parts[0]) * 60 + int.parse(parts[1]);
+  try {
+    final parts = time.split(':');
+    if (parts.length < 2) return 0;
+    final hour = int.tryParse(parts[0]) ?? 0;
+    final minute = int.tryParse(parts[1]) ?? 0;
+    return hour * 60 + minute;
+  } catch (_) {
+    return 0;
+  }
 }
 
 class StudentLocation {
@@ -156,7 +250,7 @@ class StudentLocatorScreen extends ConsumerWidget {
                   return _EmptyState(
                     icon: Icons.search_rounded,
                     title: 'Search Students',
-                    subtitle: 'Type a USN to find current class and room',
+                    subtitle: 'Type a USN to find current class and room\n\nExample: 4TV24CS001',
                   );
                 }
                 if (locations.isEmpty) {

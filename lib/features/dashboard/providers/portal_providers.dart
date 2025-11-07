@@ -91,7 +91,38 @@ final announcementsStreamProvider = StreamProvider.autoDispose<List<Map<String, 
              audienceList.isEmpty;
     }).toList();
     
-    final sorted = List<Map<String, dynamic>>.from(filtered)
+    // Deduplicate announcements to prevent showing duplicates
+    // For invigilation announcements, check by date/time in body to prevent duplicates
+    final seen = <String>{};
+    final deduplicated = <Map<String, dynamic>>[];
+    for (final ann in filtered) {
+      final title = ann['title']?.toString() ?? '';
+      final body = ann['body']?.toString() ?? '';
+      
+      String key;
+      // For invigilation announcements, use date and time from body for better deduplication
+      if (title == 'Invigilation Duty Assigned') {
+        // Extract date and time from body: "You are assigned to invigilate X on YYYY-MM-DD at HH:MM"
+        final dateMatch = RegExp(r'(\d{4}-\d{2}-\d{2})').firstMatch(body);
+        final timeMatch = RegExp(r'at (\d{2}:\d{2})').firstMatch(body);
+        if (dateMatch != null && timeMatch != null) {
+          key = '$title|${dateMatch.group(1)}|${timeMatch.group(1)}';
+        } else {
+          // Fallback to full body if pattern doesn't match
+          key = '$title|$body';
+        }
+      } else {
+        // For other announcements, use title and body
+        key = '$title|$body';
+      }
+      
+      if (!seen.contains(key)) {
+        seen.add(key);
+        deduplicated.add(ann);
+      }
+    }
+    
+    final sorted = List<Map<String, dynamic>>.from(deduplicated)
       ..sort((a, b) {
         try {
           return DateTime.parse((b['created_at']).toString()).compareTo(DateTime.parse((a['created_at']).toString()));

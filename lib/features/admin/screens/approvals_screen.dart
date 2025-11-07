@@ -8,8 +8,17 @@ final pendingProfilesProvider = StreamProvider<List<Map<String, dynamic>>>((ref)
       .stream(primaryKey: ['id'])
       .map((rows) {
         final list = List<Map<String, dynamic>>.from(rows)
-            .where((r) => (r['role']?.toString() ?? '') != 'student' && (r['approved'] as bool?) == false)
+            .where((r) {
+              final role = r['role']?.toString() ?? '';
+              final approved = r['approved'];
+              // Include faculty and admin profiles that are not approved (false or null)
+              // Students are auto-approved, so we only need to approve faculty and admin
+              final isFacultyOrAdmin = role == 'faculty' || role == 'admin';
+              final isNotApproved = approved == false || approved == null;
+              return isFacultyOrAdmin && isNotApproved;
+            })
             .toList();
+        // Sort by creation date (oldest first)
         list.sort((a, b) {
           final ad = DateTime.tryParse((a['created_at'])?.toString() ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
           final bd = DateTime.tryParse((b['created_at'])?.toString() ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
@@ -22,9 +31,11 @@ final pendingProfilesProvider = StreamProvider<List<Map<String, dynamic>>>((ref)
 class AdminApprovalsScreen extends ConsumerWidget {
   const AdminApprovalsScreen({super.key});
 
-  Future<void> _setApproval({required String id, required bool approved, required BuildContext context}) async {
+  Future<void> _setApproval({required String id, required bool approved, required BuildContext context, required WidgetRef ref}) async {
     try {
       await supabase.from('profiles').update({'approved': approved}).eq('id', id);
+      // Invalidate the stream to refresh the list
+      ref.invalidate(pendingProfilesProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(approved ? 'Approved' : 'Rejected')),
@@ -66,12 +77,12 @@ class AdminApprovalsScreen extends ConsumerWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       IconButton(
-                        onPressed: () => _setApproval(id: id, approved: false, context: context),
+                        onPressed: () => _setApproval(id: id, approved: false, context: context, ref: ref),
                         icon: const Icon(Icons.close, color: Colors.red),
                         tooltip: 'Reject',
                       ),
                       IconButton(
-                        onPressed: () => _setApproval(id: id, approved: true, context: context),
+                        onPressed: () => _setApproval(id: id, approved: true, context: context, ref: ref),
                         icon: const Icon(Icons.check, color: Colors.green),
                         tooltip: 'Approve',
                       ),

@@ -5,6 +5,7 @@ import '../../auth/providers/auth_providers.dart';
 import '../../room/screens/room_availability_screen.dart';
 import '../../timetable/screens/admin_timetable_manage_screen.dart';
 import '../../exam/screens/admin_exam_allocation_screen.dart';
+import '../../exam/screens/admin_exam_manage_screen.dart';
 import '../../profile/screens/profile_screen.dart';
 import '../../students/screens/students_list_screen.dart';
 import '../providers/portal_providers.dart';
@@ -282,6 +283,15 @@ class AdminDashboard extends ConsumerWidget {
                   icon: Icons.assignment,
                   onTap: () => context.push('/admin/exam-allocation'),
                   subtitle: 'Allocate invigilators and rooms',
+                ),
+                const SizedBox(height: 16),
+                _ActionCard(
+                  title: 'Manage Exams',
+                  icon: Icons.manage_search,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const AdminExamManageScreen()),
+                  ),
+                  subtitle: 'View and delete allocated exams',
                 ),
                 const SizedBox(height: 16),
                 _ActionCard(
